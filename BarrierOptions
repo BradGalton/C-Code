@@ -1,0 +1,133 @@
+#include <Rcpp.h>
+#include <algorithm>
+#include <numeric>
+#include <cmath>
+#include <iostream>
+#include <string>
+
+
+class BrownianMotion  
+{
+  public:
+    BrownianMotion(double tau, double riskFreeRate, double volatility):
+      tau_(tau), riskFreeRate_(riskFreeRate), volatility_(volatility){}
+  
+    double operator()(double variate)
+    {
+      return riskFreeRate_*tau_ + volatility_*std::sqrt(tau_)*variate;
+    }
+    
+  private:
+    double tau_;
+    double riskFreeRate_;
+    double volatility_;
+};
+
+//[[Rcpp::export]]
+Rcpp::NumericVector equityReturnScenarios(double tau, double riskFreeRate, 
+  double volatility, int numScenarios)
+{
+  // tau: Daycount-adjusted year fraction from value date to maturity
+  // date in the case of an option.
+    
+  BrownianMotion brown(tau, riskFreeRate, volatility);
+  Rcpp::NumericVector scenarios = Rcpp::rnorm(numScenarios);
+  
+  Rcpp::NumericVector::iterator pos;  
+  for(pos = scenarios.begin(); pos != scenarios.end(); ++pos)
+  {
+    *pos = brown(*pos);   
+  }
+  
+  return scenarios;  
+}
+
+//[[Rcpp::export]]
+// Added variables barrier, isUpOut, and divYield
+double monteCarloBarrierOptionPricer(double strike, double spot, double barrier, double timeToMaturity,
+	double timeToSettlement, bool isCall, bool isUpOut, double riskFreeRate, double divYield, double volatility, int numScenarios)
+{
+	Rcpp::NumericVector returns = equityReturnScenarios(timeToMaturity, riskFreeRate, volatility, numScenarios);
+	Rcpp::NumericVector priceScenarios = spot + returns;
+	double df = std::exp(-riskFreeRate * timeToSettlement);
+
+	// Barrier Option Variable Definitions
+	double m = riskFreeRate - divYield - 0.5 * volatility*volatility;
+	double b = std::log(strike / spot);
+	double A = std::exp(2 * m*b / volatility*volatility);
+
+	double Zx1 = (std::log(barrier / spot) - m * timeToMaturity) / (volatility * std::sqrt(timeToMaturity));
+	double Zx2 = (std::log(barrier / spot) - m * timeToMaturity - 2 * b) / (volatility * std::sqrt(timeToMaturity));
+	double Zk1 = (std::log(strike / spot) - m * timeToMaturity) / (volatility * std::sqrt(timeToMaturity));
+	double Zk2 = (std::log(strike / spot) - m * timeToMaturity) - 2 * b / (volatility * std::sqrt(timeToMaturity));
+
+	double bsc1 = Rcpp::stats::pnorm_0((volatility*std::sqrt(timeToMaturity) - Zx1), 1, 0) * spot * std::exp(m + 0.5*volatility*volatility);
+	double bsc2 = Rcpp::stats::pnorm_0(-Zx1, 1, 0) * barrier;
+	double bsp1 = Rcpp::stats::pnorm_0(-(volatility*std::sqrt(timeToMaturity) - Zx1), 1, 0) * spot * std::exp(m + 0.5*volatility*volatility);
+	double bsp2 = Rcpp::stats::pnorm_0(Zx1, 1, 0) * barrier;
+	double BSc = std::exp(-riskFreeRate*timeToMaturity) * (bsc1 - bsc2);
+	double BSp = -std::exp(-riskFreeRate*timeToMaturity) * (bsp1 - bsp2);
+
+	double Gc1 = Rcpp::stats::pnorm_0((volatility*std::sqrt(timeToMaturity) - Zk1), 1, 0) * spot * std::exp((m + 0.5*volatility*volatility)*timeToMaturity);
+	double Gc2 = Rcpp::stats::pnorm_0(-Zk1, 1, 0) * barrier;
+	double Gp1 = Rcpp::stats::pnorm_0(-(volatility*std::sqrt(timeToMaturity) - Zk1), 1, 0) * spot * std::exp((m + 0.5*volatility*volatility)*timeToMaturity);
+	double Gp2 = Rcpp::stats::pnorm_0(Zk1, 1, 0) * barrier;
+	double Gc = std::exp(-riskFreeRate*timeToMaturity) * (Gc1 - Gc2);
+	double Gp = -std::exp(-riskFreeRate*timeToMaturity) * (Gp1 - Gp2);
+
+	double Hu1 = Rcpp::stats::pnorm_0((Zx2 - volatility*std::sqrt(timeToMaturity)), 1, 0) * spot * std::exp(2*b + (m + 0.5*volatility*volatility)* timeToMaturity);
+	double Hu2 = Rcpp::stats::pnorm_0(Zx2, 1, 0) * barrier;
+	double Hd1 = Rcpp::stats::pnorm_0(-(Zx2 - volatility*std::sqrt(timeToMaturity)), 1, 0) * spot * std::exp(2 * b + (m + 0.5*volatility*volatility)* timeToMaturity);
+	double Hd2 = Rcpp::stats::pnorm_0(-Zx2, 1, 0) * barrier;
+	double Huc = A * std::exp(-riskFreeRate * timeToMaturity) * (Hu1 - Hu2);
+	double Hup = -A * std::exp(-riskFreeRate * timeToMaturity) * (Hu1 - Hu2);
+	double Hdc = A * std::exp(-riskFreeRate * timeToMaturity) * (Hd1 - Hd2);
+	double Hdp = -A * std::exp(-riskFreeRate * timeToMaturity) * (Hd1 - Hd2);
+
+	double Ju1 = Rcpp::stats::pnorm_0((Zk2 - volatility*std::sqrt(timeToMaturity)), 1, 0) * spot * std::exp(2 * b + (m + 0.5*volatility*volatility)* timeToMaturity);
+	double Ju2 = Rcpp::stats::pnorm_0(Zk2, 1, 0) * barrier;
+	double Jd1 = Rcpp::stats::pnorm_0(-(Zk2 - volatility*std::sqrt(timeToMaturity)), 1, 0) * spot * std::exp(2 * b + (m + 0.5*volatility*volatility)* timeToMaturity);
+	double Jd2 = Rcpp::stats::pnorm_0(-Zk2, 1, 0) * barrier;
+	double Juc = A * std::exp(-riskFreeRate * timeToMaturity) * (Ju1 - Ju2);
+	double Jup = -A * std::exp(-riskFreeRate * timeToMaturity) * (Ju1 - Ju2);
+	double Jdc = A * std::exp(-riskFreeRate * timeToMaturity) * (Jd1 - Jd2);
+	double Jdp = -A * std::exp(-riskFreeRate * timeToMaturity) * (Jd1 - Jd2);
+
+	Rcpp::NumericVector::iterator pos;
+
+	for (pos = priceScenarios.begin(); pos != priceScenarios.end(); ++pos)
+	{
+		if ((isCall && (*pos <= strike)) || (!isCall && (*pos >= strike)))  // out of the money at maturity
+		{
+			*pos = 0.0;
+		}
+		else if ((isCall && isUpOut && (strike < barrier) && (*pos >= strike)) || (!isCall && !isUpOut && (barrier < strike) && (*pos <= strike)))
+		{
+			*pos = 0.0;
+		}
+		else if ((isCall && isUpOut && (barrier < strike) && (*pos >= strike)) || (!isCall && !isUpOut && (strike < barrier) && (*pos <= strike)))
+		{
+			*pos = isCall && isUpOut ? BSc - Gc - Juc - Huc : BSp - Gp - Jdp - Hdp;
+		}
+		else if ((isCall && !isUpOut && (strike < barrier) && (*pos >= strike)) || (!isCall && isUpOut && (barrier < strike) && (*pos < strike)))
+		{
+			*pos = isCall && !isUpOut ? BSc - Hdc : BSp - Hup;
+		}
+		else if ((isCall && !isUpOut && (barrier < strike) && (*pos >= strike)) || (!isCall && isUpOut && (strike < barrier) && (*pos < strike)))
+		{
+			*pos = isCall && !isUpOut ? Gc - Jdc : Gp - Jup;
+		}
+		else
+		{
+			*pos = 0;
+		}
+
+  }
+ 
+  priceScenarios = df * priceScenarios;
+  
+  double optionPrice = std::accumulate(priceScenarios.begin(), priceScenarios.end(), 0.0) / static_cast<double>(numScenarios);
+  
+  return optionPrice; 
+}
+}
