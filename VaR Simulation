@@ -1,0 +1,177 @@
+#include "ScenarioGeneration.h"
+#include "FileToMatrix.h"
+#include "BrownianMotion.h"
+#include <Eigen/Dense>
+#include <cmath>
+#include <vector>
+#include <algorithm>
+#include <numeric>
+#include <exception>
+#include <random>
+#include <iostream>
+
+
+using Eigen::MatrixXd;
+using Eigen::VectorXd;
+using Eigen::Map;
+using Eigen::LLT;
+using std::vector;
+using std::exception;
+using std::mt19937_64;
+using std::normal_distribution;
+using std::erf;
+using std::sqrt;
+using std::accumulate;
+using std::sort;
+using std::cout;
+using std::endl;
+
+
+// Function generalized to calculate returns for correlated assets
+// Function takes correlation matrix and vector arguments for drift and volatility
+MatrixXd generateMultiAssetReturns(const MatrixXd& corMatrix,
+	const VectorXd& driftVector,
+	const VectorXd& volVector,
+	double yearFraction,
+	int numScenarios)
+{
+	if (numScenarios <= 0)
+	{
+		throw exception("Number of scenarios must be positive");
+	}
+
+	// Cholesky decomposition of correlation matrix
+	LLT<MatrixXd> lltOfA(corMatrix);
+	MatrixXd L = lltOfA.matrixL();
+
+	// Simulate correlated variates and populate a matrix object using a
+	// for loop converting random normal variates to correlated variates
+	MatrixXd simMatrix(numScenarios, driftVector.size());
+	VectorXd simVariates;
+
+	for (int i = 0; i < numScenarios; ++i)
+	{
+		simVariates = generateNormalVariates(driftVector.size(), i);       // Generates different seeds for each sample
+		simMatrix.row(i) = L * simVariates * sqrt(yearFraction);
+	}
+
+	// Iterate through simulation matrix to generate returns matrix using 
+	// BrownianMotion functor (dynamic drift and volatility).
+	MatrixXd corReturns(numScenarios, driftVector.size());
+
+	for (int j = 0; j < driftVector.size(); ++j)
+	{
+		BrownianMotion brown(driftVector(j), volVector(j), yearFraction);
+		for (int i = 0; i < numScenarios; ++i)
+		{
+			corReturns(i, j) = brown(simMatrix(i, j));
+		}
+	}
+
+	//cout << StdDev(corReturns.col(0)) << StdDev(corReturns.col(1)) << StdDev(corReturns.col(4)) << StdDev(corReturns.col(5)) << endl << endl;;
+	return corReturns;
+}
+
+
+VectorXd generateNormalVariates(int numVariates, int seed)
+{
+	mt19937_64 mtre(seed);
+	normal_distribution<> nd;
+	vector<double> nv;
+
+	for (int i = 0; i < numVariates; ++i)
+	{
+		nv.push_back(nd(mtre));
+	}
+
+	Map<VectorXd> normVariates(nv.data(), numVariates);
+
+	return normVariates;
+}
+
+double valueAtRisk(const MatrixXd& corMatrix, const VectorXd& driftVector,
+					const VectorXd& volVector, double yearFraction,
+					const VectorXd& weights, double percentile)
+{
+
+		int numScenarios = 10000;
+
+		// Call function to generate daily correlated returns matrix
+		MatrixXd corReturns = generateMultiAssetReturns(corMatrix, driftVector, volVector, yearFraction, numScenarios);
+
+		// Generate vector of daily portfolio returns using index weights
+		VectorXd portReturns(numScenarios);
+
+		for (int i = 0; i < numScenarios; ++i)
+		{
+			portReturns(i) = corReturns.row(i) * weights; // Dot product of daily index returns and index weights
+		}
+
+		// Calculate portfolio standard deviation
+		double portVolatility = StdDev(portReturns);
+
+		// Sort portfolio returns in ascending order
+		sort(portReturns.data(), portReturns.data() + portReturns.size());
+
+		// Find the index that represents the (alpha * 100)%-tile:
+		double percentileIdxAsDouble = (percentile)* static_cast<double>(numScenarios);
+		int percentileIdx = static_cast<int>(percentileIdxAsDouble);
+
+		if (percentile == 0.05)
+		{
+			double dailyVar95 = portReturns(percentileIdx);
+			cout << "One day 95.0% VaR for the portfolio : " << endl;
+			cout << dailyVar95 << endl << endl;
+
+			// Convert daily VaR to annual VaR
+			cout << "One year 95.0% VaR for the portfolio : " << endl;
+			double annualVar95 = -1.644854 * portVolatility * sqrt(252);				// 5% alpha, 252 trading days per year
+			cout << annualVar95 << endl << endl;
+		}
+		else if (percentile == 0.01)
+		{
+			double dailyVar99 = portReturns(percentileIdx);
+			cout << "One day 99.0% VaR for the portfolio : " << endl;
+			cout << dailyVar99 << endl << endl;
+
+			// Convert daily VaR to annual 99% VaR
+			cout << "One year 99.0% VaR for the portfolio : " << endl;
+			double annualVar99 = -2.326348 * portVolatility * sqrt(252);				// 1% alpha, 252 trading days per year
+			cout << annualVar99 << endl << endl;
+		}
+		else
+		{
+			double dailyVar = portReturns(percentileIdx);
+			cout << "One day VaR for the portfolio : " << endl;
+			cout << dailyVar << endl << endl;
+
+			cout << "Annualized VaR only computed at 5% and 1% percentiles" << endl;
+		}
+
+
+		return 0;
+	}
+
+	// Function to calculate sample standard deviation
+	double StdDev(const VectorXd& retVector)
+	{
+		VectorXd epsVector(retVector.size());
+		double eps = 0.0;
+
+		for (int i = 0; i < retVector.size(); ++i)
+		{
+			epsVector(i) = retVector(i) - retVector.mean();
+		}
+
+		for (int i = 0; i < retVector.size(); ++i)
+		{
+			epsVector(i) *= epsVector(i);
+		}
+
+		double n = retVector.size();
+		double sum = epsVector.sum();
+		double sigmaSquare = (1 / (n - 1)) * sum;
+		double S = sqrt(sigmaSquare);
+
+		return S;
+	}
